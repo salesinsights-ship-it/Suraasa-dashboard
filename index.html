@@ -1067,10 +1067,29 @@ function saveConfig(cfg) {
     localStorage.setItem('suraasa_dash_v2_config', JSON.stringify(cfg));
 }
 
+// Tab name → numeric sheet GID, used by the CSV export endpoint below.
+// The /export endpoint returns the COMPLETE sheet and IGNORES any filter (basic filter
+// OR filter view) on the tab — unlike gviz, which respects filters. This is what makes
+// the dashboard truly immune to whatever filters anyone applies in the Google Sheet.
+const TAB_GIDS = {
+    'Combined Sales': '1029177840',
+    'Collections Combined': '1537446750',
+    'Setter Call & CRM Metric': '853280156',
+    'Closer CRM Metric': '134491456',
+    'Call Volume': '1311508140',
+    'Overall Activity': '1468441261',
+    'Hubspot Data - CS': '2144347280',
+    'Hubspot Data - CC': '1301543953',
+    'Hubspot Data - PDS': '1034014871',
+    'Hubspot Data - OLS': '1183557294'
+};
+
 function csvUrl(sheetId, tabName) {
-    // The 'select *' query forces Google to return ALL rows, ignoring any basic
-    // filter on the tab — so sheet filters never affect the dashboard.
-    return 'https://docs.google.com/spreadsheets/d/' + sheetId + 
+    const gid = TAB_GIDS[tabName];
+    // Preferred: CSV export endpoint — returns ALL rows, ignoring any filter on the tab.
+    if (gid) return 'https://docs.google.com/spreadsheets/d/' + sheetId + '/export?format=csv&gid=' + gid;
+    // Fallback (tab not in the map): gviz with select * — still attempts to bypass filters.
+    return 'https://docs.google.com/spreadsheets/d/' + sheetId +
            '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(tabName) +
            '&tq=' + encodeURIComponent('select * limit 1000000');
 }
@@ -1115,13 +1134,11 @@ async function fetchTab(sheetId, tabName) {
     // never to an old bundled snapshot. (No JSON files are deployed alongside index.html.)
     const BUNDLED_DATA = {};
     
-    // STEP 1: Live gviz fetch. The 'select *' query forces Google to return ALL rows,
-    // ignoring any basic filter active on the tab — so sheet filters NEVER affect the dashboard.
+    // STEP 1: Live fetch via the CSV export endpoint (filter-immune). Returns the COMPLETE
+    // sheet regardless of any filter applied to the tab — so sheet filters NEVER affect the dashboard.
     let gvizRows = null;
     try {
-        const url = 'https://docs.google.com/spreadsheets/d/' + sheetId + 
-            '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(tabName) +
-            '&tq=' + encodeURIComponent('select * limit 1000000');
+        const url = csvUrl(sheetId, tabName);
         const res = await fetch(url, { mode: 'cors' });
         if (res.ok) {
             const text = await res.text();
@@ -1130,7 +1147,7 @@ async function fetchTab(sheetId, tabName) {
             }
         }
     } catch (e) {
-        console.warn('gviz fetch failed for "' + tabName + '":', e.message);
+        console.warn('CSV fetch failed for "' + tabName + '":', e.message);
     }
     
     // STEP 2: Load bundled JSON (filter-free snapshot from last deploy)
@@ -1953,19 +1970,21 @@ async function loadLiveData(silent) {
         
         setStatus('✓ ' + salesTxns.length + ' sales · ₹' + (RAW._meta.totalRevenue/10000000).toFixed(2) + 'Cr · ' + setters.length + ' setters · ' + closers.length + ' closers', 100);
         
-        // FILTER WARNING: Check if critical tabs returned suspiciously few rows
+        // SAFETY NET: warn only if a core tab loads suspiciously few rows (e.g. a transient
+        // Google export hiccup). Filters no longer matter — data comes from the filter-immune
+        // export endpoint — so the fix is simply to reload, not to touch the sheet.
         const warnings = [];
         if (salesTxns.length < 500) {
-            warnings.push('⚠️ CRITICAL: Combined Sales has only ' + salesTxns.length + ' rows (expected 1000+). A FILTER IS ACTIVE on this sheet tab. Go to Google Sheet → Combined Sales tab → Data → Remove Filter → then reload this dashboard.');
+            warnings.push('Combined Sales loaded only ' + salesTxns.length + ' rows (expected 1000+). The data may not have loaded fully — please reload the dashboard.');
         }
         if (collTxns.length < 100 && salesTxns.length > 200) {
-            warnings.push('⚠️ Collections Combined: only ' + collTxns.length + ' rows loaded. Clear filters on this tab in Google Sheet.');
+            warnings.push('Collections Combined loaded only ' + collTxns.length + ' rows. Please reload the dashboard.');
         }
         if (warnings.length > 0 && silent !== true) {
             setTimeout(() => {
                 const banner = document.createElement('div');
                 banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:#dc2626;color:white;padding:16px 24px;font-size:14px;font-weight:700;text-align:center;border-bottom:3px solid #991b1b;cursor:pointer;line-height:1.6;';
-                banner.innerHTML = '🚨 DATA WARNING — SHEET FILTER ACTIVE 🚨<br><span style="font-weight:400;font-size:13px;">' + warnings.join('<br>') + '</span><br><span style="font-size:11px;font-weight:400;opacity:0.8;">(Click to dismiss — but data will be wrong until you clear the filter)</span>';
+                banner.innerHTML = '⚠️ DATA DID NOT LOAD FULLY<br><span style="font-weight:400;font-size:13px;">' + warnings.join('<br>') + '</span><br><span style="font-size:11px;font-weight:400;opacity:0.8;">(Click to dismiss)</span>';
                 banner.onclick = () => banner.remove();
                 document.body.appendChild(banner);
             }, 500);
